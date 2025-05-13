@@ -9,29 +9,72 @@
 # BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations under the License.
 
-import os
-import string
+import json
 import random
-from locust import HttpLocust, TaskSet, task
+from locust import HttpUser, between, task
+import locust
+from websocket import create_connection
+import ssl
+import time
+# https://dotabackseater.ruvice.com/
 
-class MyTaskSet(TaskSet):
-    @task(1000)
-    def index(self):
-        response = self.client.get("/")
+class HybridUser(HttpUser):
+    def on_start(self):
+        self.vote_session_started = False
+        self.client.get(
+            "config/40825038",
+            headers={"Channel-Id": "40825038"}
+        )
+        # --- Setup WebSocket connection ---
+        try:
+            self.ws = create_connection(
+                "wss://dotabackseater.ruvice.com/ws/40825038",  # Replace with your actual WSS URL
+                sslopt={"cert_reqs": ssl.CERT_NONE}  # Disable cert verification (for testing only)
+            )
+            print("WebSocket connection success")
+            # 🔥 Start WebSocket listening thread
+            import threading
+            threading.Thread(target=self._listen_ws, daemon=True).start()
+        except Exception as e:
+            print("WebSocket connection failed:", e)
 
-    # This task will 15 times for every 1000 runs of the above task
-    # @task(15)
-    # def about(self):
-    #     self.client.get("/blog")
+    def on_stop(self):
+        # --- Clean up WebSocket ---
+        if hasattr(self, 'ws'):
+            self.ws.close()
+            print("Closed websocket connection")
+    
+    def _listen_ws(self):
+        while True:
+            try:
+                msg = self.ws.recv()
+                message = json.loads(msg)
+                event_type = message.get("event")
+                data = message.get("data")
 
-    # This task will run once for every 1000 runs of the above task
-    # @task(1)
-    # def about(self):
-    #     id = id_generator()
-    #     self.client.post("/signup", {"email": "example@example.com", "name": "Test"})
+                if event_type == "voteSession":
+                    if data == "started":
+                        print("Vote session started")
+                        self.vote_session_started = True
+                    else:
+                        print("Vote session ended or paused")
+                        self.vote_session_started = False
+            except Exception as e:
+                print("WebSocket listener error:", e)
+                break
 
-class MyLocust(HttpLocust):
-    host = os.getenv('TARGET_URL', "http://localhost")
-    task_set = MyTaskSet
-    min_wait = 45
-    max_wait = 50
+    @task
+    def vote_hero_if_active(self):
+        if not getattr(self, "vote_session_started", False):
+            return  # Exit early if vote session not started
+        randomId = random.randint(1, 100000)
+        hero_id = random.randint(1, 139)
+        self.client.post(
+            "vote/hero/",
+            headers={"Channel-Id": "40825038"},
+            json={
+                "channel_id": "40825038",
+                "twitch_id": str(randomId),
+                "hero_id": str(hero_id)
+            }
+        )
